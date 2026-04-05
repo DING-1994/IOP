@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>ShareHouse RPG</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0d0d1a; color: #ddd; font-family: 'Courier New', monospace;
+       display: flex; flex-direction: column; align-items: center; padding: 20px; min-height: 100vh; }
+h1 { color: #f0c040; font-size: 15px; letter-spacing: 3px; margin-bottom: 16px; }
+#app { display: flex; width: 860px; border: 1px solid #333; border-radius: 8px; overflow: hidden; background: #1a1a2e; }
+#hud { background: #0d0d1a; padding: 5px 12px; border-bottom: 1px solid #333;
+       display: flex; justify-content: space-between; font-size: 11px; }
+#day-label { color: #f0c040; }
+#state-label { color: #7ec8e3; }
+#left { flex: 1; display: flex; flex-direction: column; }
+#left #hud { flex-shrink: 0; }
+canvas { display: block; image-rendering: pixelated; }
+#right { width: 320px; border-left: 1px solid #333; display: flex; flex-direction: column; background: #0f0f1e; }
+#portrait { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+            border-bottom: 1px solid #333; background: #0d0d1a; min-height: 64px; }
+#avatar { font-size: 26px; width: 44px; height: 44px; border: 2px solid #333;
+          border-radius: 4px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+#npc-name { font-size: 13px; font-weight: bold; color: #f0c040; }
+#npc-role { font-size: 10px; color: #666; margin-top: 2px; }
+#chat-log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column;
+            gap: 6px; min-height: 0; max-height: 340px; }
+.bubble { padding: 6px 10px; border-radius: 6px; font-size: 11px; line-height: 1.6; max-width: 95%; }
+.bubble.npc  { background: #1e1e3e; border-left: 3px solid #f0c040; align-self: flex-start; }
+.bubble.user { background: #1a3a2a; border-right: 3px solid #2ecc71; align-self: flex-end;
+               color: #b5e8c7; text-align: right; }
+.bubble.sys  { color: #555; font-size: 10px; font-style: italic; align-self: center; text-align: center; }
+.bubble.thinking { color: #444; font-size: 10px; align-self: flex-start; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+.thinking { animation: blink 1s infinite; }
+#input-area { border-top: 1px solid #222; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+textarea { background: #0d0d1a; border: 1px solid #444; color: #ddd; padding: 6px 8px;
+           font-family: 'Courier New', monospace; font-size: 11px; resize: none; height: 48px;
+           border-radius: 4px; outline: none; width: 100%; }
+textarea:focus { border-color: #f0c040; }
+textarea:disabled, button:disabled { opacity: 0.4; cursor: not-allowed; }
+#send-btn { background: #1a3a1a; border: 1px solid #2ecc71; color: #2ecc71;
+            padding: 5px; font-family: 'Courier New', monospace; font-size: 11px;
+            cursor: pointer; border-radius: 4px; width: 100%; }
+#send-btn:hover:not(:disabled) { background: #2a4a2a; }
+#controls-hint { background: #0a0a14; border-top: 1px solid #222; padding: 4px 10px;
+                 font-size: 10px; color: #555; text-align: center; }
+</style>
+</head>
+<body>
+<h1>★ SHAREHOUSE RPG ★</h1>
+<div id="app">
+  <div id="left">
+    <div id="hud">
+      <span id="day-label">Day 1</span>
+      <span id="state-label">—</span>
+    </div>
+    <canvas id="game" width="540" height="396"></canvas>
+    <div id="controls-hint">WASD / 方向键 移动　｜　E 键与 NPC 对话</div>
+  </div>
+  <div id="right">
+    <div id="portrait">
+      <div id="avatar">👤</div>
+      <div>
+        <div id="npc-name">等待连接...</div>
+        <div id="npc-role"></div>
+      </div>
+    </div>
+    <div id="chat-log"></div>
+    <div id="input-area">
+      <textarea id="user-input" placeholder="输入回复... (Enter 发送)" disabled></textarea>
+      <button id="send-btn" disabled>发 送 ↵</button>
+    </div>
+  </div>
+</div>
+<script src="/game/render.js"></script>
+<script src="bridge.js"></script>
+</body>
+</html>
