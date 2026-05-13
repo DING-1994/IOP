@@ -1,7 +1,8 @@
-Server	Command	URL
-Bridge (full)	uvicorn app:app --port 8000	http://127.0.0.1:8000
-Game only	uvicorn game.app:app --port 8001	http://127.0.0.1:8001
-FSM only	uvicorn fsm.app:app --port 8002	http://127.0.0.1:8002
+| Server | Command | URL |
+|--------|---------|-----|
+| Bridge (full) | `uvicorn app:app --port 8000` | http://127.0.0.1:8000 |
+| Game only | `uvicorn game.app:app --port 8001` | http://127.0.0.1:8001 |
+| FSM only | `uvicorn fsm.app:app --port 8002` | http://127.0.0.1:8002 |
 
 
 
