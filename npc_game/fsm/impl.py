@@ -32,23 +32,44 @@ class JsonScenario:
         """
         raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
         self._chars: dict = raw["characters"]
-        self._days: dict  = raw["days"]
+        # スペースを除去して "Day 1" と "Day1" の両方を "Day1" に統一
+        self._days: dict = {k.replace(" ", ""): v for k, v in raw["days"].items()}
 
     def _flatten(self, day: str) -> list[dict]:
         """
         機能：指定日のシナリオデータをフラットなステップリストに展開する。
-        入力：day（日付文字列、例: "Day 1"）
-        出力：speaker, state, content, mbti_focus を含む dict のリスト
+              新フォーマット（flat + active_speaker）と旧フォーマット（state_list）の両方に対応。
+              narrator エントリーも含める（FSM 側でスキップ・収集する）。
+        入力：day（日付文字列、例: "Day1"）
+        出力：speaker, content, focus, instruction, state を含む dict のリスト
         """
         flat = []
-        for entry in self._days.get(day, []):
-            for s in entry.get("state_list", []):
+        for entry in self._days.get(day.replace(" ", ""), []):
+            if "active_speaker" in entry:
+                # 新フォーマット：1エントリー = 1ステップ（フラット構造）
+                speaker = entry["active_speaker"]
+                focus   = entry.get("focus", "")
                 flat.append({
-                    "speaker":    entry["speaker"],
-                    "state":      s["state"],
-                    "content":    s["content"],
-                    "mbti_focus": s.get("mbti_focus", ""),
+                    "speaker":            speaker,
+                    "content":            entry.get("content", ""),
+                    "focus":              focus,
+                    "instruction":        entry.get("instruction", ""),
+                    "state":              focus,
+                    "night_mode":         entry.get("nightMode", False),
+                    "q_no":               entry.get("q_no"),
+                    "corresponding_item": entry.get("corresponding_item", ""),
                 })
+            else:
+                # 旧フォーマット：state_list ネスト構造
+                for s in entry.get("state_list", []):
+                    focus = s.get("mbti_focus", "")
+                    flat.append({
+                        "speaker":     entry["speaker"],
+                        "content":     s["content"],
+                        "focus":       focus,
+                        "instruction": s.get("instruction", ""),
+                        "state":       s.get("state", focus),
+                    })
         return flat
 
     def get_step(self, day: str, index: int) -> Step | None:
@@ -62,8 +83,16 @@ class JsonScenario:
             return None
         s = steps[index]
         return Step(
-            day=day, state=s["state"], speaker=s["speaker"],
-            content=s["content"], mbti_focus=s["mbti_focus"],
+            day=day,
+            speaker=s["speaker"],
+            content=s["content"],
+            focus=s.get("focus", ""),
+            instruction=s.get("instruction", ""),
+            state=s.get("state", ""),
+            capture=s.get("capture", []),
+            corresponding_item=s.get("corresponding_item", ""),
+            night_mode=s.get("night_mode", False),
+            q_no=s.get("q_no"),
         )
 
     def get_character(self, name: str) -> Character:
@@ -85,9 +114,9 @@ class JsonScenario:
 
     def days(self) -> list[str]:
         """
-        機能：シナリオに含まれる全日程の一覧を返す。
+        機能：シナリオに含まれる全日程の一覧を返す（スペース除去済みキー）。
         入力：なし
-        出力：日付文字列のリスト（例: ["Day 1", "Day 2", ...]）
+        出力：日付文字列のリスト（例: ["Day1", "Day2", ...]）
         """
         return list(self._days.keys())
 
@@ -98,17 +127,23 @@ class ShareHouseFSM:
     """純粋な状態機械。IFSM を実装し、LLM を一切呼び出さない。"""
 
     def __init__(self, scenario: IScenario, day: str,
-                 index: int = 0, history: list[dict] | None = None):
+                 index: int = 0, history: list[dict] | None = None,
+                 npc_histories: dict[str, list[list[dict]]] | None = None,
+                 full_history: list[dict] | None = None):
         """
         機能：指定日・インデックス・履歴で FSM を初期化する。
         入力：scenario（IScenario 実装）、day（開始日）、index（開始ステップインデックス）、
-              history（過去の会話履歴、省略時は空リスト）
+              history（現ステップの会話履歴、省略時は空リスト）、
+              npc_histories（NPC ごとの過去ステップ履歴、省略時は空 dict）、
+              full_history（全ステップ横断の通算履歴、省略時は空リスト）
         出力：なし
         """
         self._sc      = scenario
         self._day     = day
         self._idx     = index
         self._history: list[dict] = history or []
+        self._npc_histories: dict[str, list[list[dict]]] = npc_histories or {}
+        self._full_history: list[dict] = list(full_history) if full_history else []
 
     @property
     def current_step(self) -> Step | None:
@@ -134,37 +169,105 @@ class ShareHouseFSM:
         入力：role（"user" または "assistant"）、content（発話テキスト）
         出力：なし
         """
-        self._history.append({"role": role, "content": content})
+        turn = {"role": role, "content": content}
+        self._history.append(turn)
+        step = self.current_step
+        entry: dict = {
+            **turn,
+            "day":     self._day,
+            "speaker": step.speaker if (step and role == "assistant") else "user",
+        }
+        if step and step.q_no is not None:
+            entry["q_no"] = step.q_no
+            entry["focus"] = step.focus
+            entry["item"]  = step.corresponding_item
+        self._full_history.append(entry)
+
+    def collect_narrator_lines(self) -> tuple[list[str], bool]:
+        """
+        機能：現在位置から連続する narrator ステップのテキストを収集し、インデックスを進める。
+              narrator ステップは会話履歴に残さない。
+        入力：なし
+        出力：(narrator テキストのリスト, 収集した narrator 中に night_mode=True があるか)
+        """
+        lines: list[str] = []
+        narrator_night = False
+        while True:
+            step = self._sc.get_step(self._day, self._idx)
+            if step is None or step.speaker != "narrator":
+                break
+            lines.append(step.content)
+            if step.night_mode:
+                narrator_night = True
+            self._idx += 1
+        return lines, narrator_night
+
+    def get_npc_history(self, speaker: str) -> list[dict]:
+        """
+        機能：指定 NPC の過去ステップ全ターンを連結して返す。ステップ間にセパレーターを挿入し
+              Anthropic API の user/assistant 交互制約を維持する。
+        入力：speaker（NPC 名前文字列）
+        出力：{"role": ..., "content": ...} 形式の dict リスト（空なら []）
+        """
+        step_histories = self._npc_histories.get(speaker, [])
+        if not step_histories:
+            return []
+        result: list[dict] = []
+        for i, step_hist in enumerate(step_histories):
+            if i > 0:
+                result.append({"role": "user", "content": "（新的一天开始了）"})
+            result.extend(step_hist)
+        return result
 
     def advance(self) -> AdvanceResult:
         """
-        機能：FSM を次のステップへ進め、進行結果を返す。日程内に次ステップがなければ翌日へ移行する。
+        機能：FSM を次のステップへ進め、進行結果を返す。現ステップの会話履歴を NPC ごとに保存してから
+              リセットする。次ステップが narrator なら自動スキップして収集する。
+              日程内に次ステップがなければ翌日へ移行する。
         入力：なし
-        出力：AdvanceResult（event, next_step, next_character）
+        出力：AdvanceResult（event, next_step, next_character, narrator_lines）
         """
+        current = self.current_step
+        if current and self._history:
+            self._npc_histories.setdefault(current.speaker, []).append(list(self._history))
         self._idx += 1
         self._history = []
+
+        narrator_lines, narrator_night = self.collect_narrator_lines()
+
         step = self._sc.get_step(self._day, self._idx)
         if step:
+            night = narrator_night or step.night_mode
             return AdvanceResult("next_state", step,
-                                 self._sc.get_character(step.speaker))
+                                 self._sc.get_character(step.speaker), narrator_lines, night)
         days = self._sc.days()
         di   = days.index(self._day)
         if di + 1 < len(days):
             self._day = days[di + 1]
             self._idx = 0
-            step = self._sc.get_step(self._day, 0)
-            return AdvanceResult("next_day", step,
-                                 self._sc.get_character(step.speaker))
-        return AdvanceResult("game_complete")
+            more_lines, more_night = self.collect_narrator_lines()
+            narrator_lines += more_lines
+            night = narrator_night or more_night
+            step = self._sc.get_step(self._day, self._idx)
+            if step:
+                night = night or step.night_mode
+                return AdvanceResult("next_day", step,
+                                     self._sc.get_character(step.speaker), narrator_lines, night)
+        return AdvanceResult("game_complete", narrator_lines=narrator_lines)
 
     def dump(self) -> dict:
         """
         機能：FSM の現在状態をシリアライズ可能な dict に変換する。
         入力：なし
-        出力：day, index, history を含む dict
+        出力：day, index, history, npc_histories, full_history を含む dict
         """
-        return {"day": self._day, "index": self._idx, "history": self._history}
+        return {
+            "day":           self._day,
+            "index":         self._idx,
+            "history":       self._history,
+            "npc_histories": self._npc_histories,
+            "full_history":  self._full_history,
+        }
 
     @classmethod
     def load(cls, scenario: IScenario, data: dict) -> "ShareHouseFSM":
@@ -173,7 +276,13 @@ class ShareHouseFSM:
         入力：scenario（IScenario 実装）、data（dump() の出力 dict）
         出力：ShareHouseFSM インスタンス
         """
-        return cls(scenario, data["day"], data["index"], data.get("history", []))
+        full_history = data.get("full_history") or None
+        return cls(
+            scenario, data["day"], data["index"],
+            data.get("history", []),
+            data.get("npc_histories", {}),
+            full_history,
+        )
 
 
 # ── IJudge ────────────────────────────────────────────────
@@ -200,12 +309,26 @@ class LLMJudge:
         if len(user_message.strip()) < 5:
             return JudgeResult(False, "too short")
         try:
+            capture_hint = ""
+            if step.capture:
+                capture_hint = f"\n观察维度：{'、'.join(step.capture)}"
+            if step.corresponding_item:
+                capture_hint += f"\n测量项：{step.corresponding_item}"
             msg = self._client.messages.create(
                 model=self._model,
                 max_tokens=60,
-                system='判断用户是否实质性地回答了问题。只输出JSON：{"answered":true/false,"reason":"简短原因"}',
+                system=(
+                    '你是行为观察员。判断用户是否对NPC的话语给出了回应（无论正面、负面还是回避）。'
+                    '只要用户回复与当前对话情境相关——包括否定、拒绝、或表示自己没有该感受——都视为answered=true。'
+                    '只有用户回复与对话完全无关时才是false。'
+                    '只输出JSON：{"answered":true/false,"reason":"简短原因"}'
+                ),
                 messages=[{"role": "user",
-                           "content": f"问题：{step.content}\n用户：{user_message}"}],
+                           "content": (
+                               f"NPC说：{step.content}"
+                               f"{capture_hint}"
+                               f"\n用户回复：{user_message}"
+                           )}],
             )
             r = json.loads(msg.content[0].text)
             return JudgeResult(bool(r["answered"]), r.get("reason", ""))
@@ -224,6 +347,64 @@ class RuleJudge:
         """
         ok = len(user_message.strip()) > 8
         return JudgeResult(ok, "rule:length>8")
+
+
+class LLMJudgeENAsync:
+    """English async variant of LLMJudge, used by offline simulation pipelines
+    that drive the FSM with `anthropic.AsyncAnthropic`. Same JSON contract
+    and same lenient policy as `LLMJudge` (negation / refusal / 'no opinion'
+    all count as `answered=true`).
+    """
+
+    def __init__(self, client: "anthropic.AsyncAnthropic",
+                 model: str = "claude-haiku-4-5-20251001"):
+        self._client = client
+        self._model = model
+
+    async def judge(self, step: Step, user_message: str) -> JudgeResult:
+        if len(user_message.strip()) < 5:
+            return JudgeResult(False, "too short")
+        try:
+            capture_hint = ""
+            if step.capture:
+                capture_hint = f"\nObservation dimensions: {', '.join(step.capture)}"
+            if step.corresponding_item:
+                capture_hint += f"\nMeasured item: {step.corresponding_item}"
+            msg = await self._client.messages.create(
+                model=self._model,
+                max_tokens=150,
+                system=(
+                    "You are a behavior observer. Decide whether the user has "
+                    "responded to the NPC's utterance (positively, negatively, "
+                    "or evasively). As long as the user's reply is relevant to "
+                    "the current dialogue context — including negation, refusal, "
+                    "or stating they do not have that feeling — count it as "
+                    "answered=true. Only completely off-topic replies count as "
+                    "answered=false. "
+                    "Respond with a single JSON object and nothing else: no "
+                    "preamble, no explanation, no markdown code fences. "
+                    'Schema: {"answered": true|false, "reason": "<= 12 words"}'
+                ),
+                messages=[{"role": "user", "content": (
+                    f"NPC said: {step.content}"
+                    f"{capture_hint}"
+                    f"\nUser reply: {user_message}"
+                )}],
+            )
+            text = msg.content[0].text.strip()
+            # Tolerate code fences and any preamble / trailing commentary.
+            if text.startswith("```"):
+                text = text.strip("`")
+                if text.lower().startswith("json"):
+                    text = text[4:]
+            lo = text.find("{")
+            hi = text.rfind("}")
+            if lo < 0 or hi <= lo:
+                raise ValueError(f"no JSON object in: {text[:120]!r}")
+            r = json.loads(text[lo:hi + 1])
+            return JudgeResult(bool(r["answered"]), r.get("reason", ""))
+        except Exception as e:
+            return JudgeResult(len(user_message.strip()) > 10, f"fallback:{e}")
 
 
 # ── IStore ────────────────────────────────────────────────
